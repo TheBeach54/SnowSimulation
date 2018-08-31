@@ -1,0 +1,20 @@
+
+		float2 uv = v.texcoord.xy;
+
+		float3 realoff = float3(-1 * _DisplaceTex_TexelSize.x * _SampleDist.x, 0, 1 * _DisplaceTex_TexelSize.y * _SampleDist.z);
+		float h00 = saturate(tex2Dlod(_DisplaceTex, float4(uv.x + realoff.x, uv.y + realoff.x, 0, 2)).x);//*scale*amplifyNormal;
+		float h10 = saturate(tex2Dlod(_DisplaceTex, float4(uv.x + realoff.y, uv.y + realoff.x, 0, 2)).x);//*scale*amplifyNormal;
+		float h20 = saturate(tex2Dlod(_DisplaceTex, float4(uv.x + realoff.z, uv.y + realoff.x, 0, 2)).x);//*scale*amplifyNormal;
+		float h01 = saturate(tex2Dlod(_DisplaceTex, float4(uv.x + realoff.x, uv.y + realoff.y, 0, 2)).x);//*scale*amplifyNormal;
+		float h11 = saturate(tex2Dlod(_DisplaceTex, float4(uv.x + realoff.y, uv.y + realoff.y, 0, 2)).x);//*scale*amplifyNormal;
+		float h21 = saturate(tex2Dlod(_DisplaceTex, float4(uv.x + realoff.z, uv.y + realoff.y, 0, 2)).x);//*scale*amplifyNormal;
+		float h02 = saturate(tex2Dlod(_DisplaceTex, float4(uv.x + realoff.x, uv.y + realoff.z, 0, 2)).x);//*scale*amplifyNormal;
+		float h12 = saturate(tex2Dlod(_DisplaceTex, float4(uv.x + realoff.y, uv.y + realoff.z, 0, 2)).x);//*scale*amplifyNormal;
+		float h22 = saturate(tex2Dlod(_DisplaceTex, float4(uv.x + realoff.z, uv.y + realoff.z, 0, 2)).x);//*scale*amplifyNormal;
+		float Gx = h00 - h20 + 2.0f * h01 - 2.0f * h21 + h02 - h22;
+		float Gy = h00 + 2.0f * h10 + h20 - h02 - 2.0f * h12 - h22;
+		float Gz = 0.5f * sqrt(max(1.0f - Gx * Gx - Gy * Gy, 0.0f));
+
+		float3 originalNormal = normalize(float3(2.0f * Gx, 2.0f * Gy, Gz ));
+		originalNormal = normalize(lerp(float3(0, 0, 1), originalNormal, _SnowMaxHeight));
+

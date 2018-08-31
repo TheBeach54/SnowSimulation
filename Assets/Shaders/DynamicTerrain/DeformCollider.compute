@@ -1,0 +1,41 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+struct VertexInput
+{
+	float3 position;
+	float2 texcoord;
+};
+
+struct VertexOutput
+{
+	float3 position;
+};
+
+RWStructuredBuffer<VertexInput> vertexBuffer;
+RWStructuredBuffer<VertexOutput> vertexBufferOut;
+Texture2D<float4> _SnowHeightTex;
+
+float _SnowMaxHeight;
+
+SamplerState _LinearRepeat;
+
+[numthreads(32,1,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+	float3 pos = vertexBuffer[id.x].position;
+	float2 uv = vertexBuffer[id.x].texcoord;
+
+	float4 heightTex = _SnowHeightTex.SampleLevel(_LinearRepeat, uv, 0.0f);
+	float4 heightTex1 = _SnowHeightTex.SampleLevel(_LinearRepeat, uv + float2(0.1,0), 0.0f);
+	float4 heightTex2 = _SnowHeightTex.SampleLevel(_LinearRepeat, uv+ float2(-0.1,0), 0.0f);
+	float4 heightTex3 = _SnowHeightTex.SampleLevel(_LinearRepeat, uv+ float2(0,0.1), 0.0f);
+	float4 heightTex4 = _SnowHeightTex.SampleLevel(_LinearRepeat, uv+ float2(0,-0.1), 0.0f);
+	
+	float h = heightTex.x +  heightTex1.x +  heightTex2.x + heightTex3.x + heightTex4.x;
+	h /= 5;
+	//pos.y = 0.0f;
+
+	vertexBufferOut[id.x].position.y = clamp(pos.y,pos.y+_SnowMaxHeight/8,pos.y - 0.05f) + _SnowMaxHeight/8 * saturate((1-h*1.1)) ;
+	//Result[id.xy] = float4(id.x & id.y, (id.x & 15)/15.0, (id.y & 15)/15.0, 0.0);
+}

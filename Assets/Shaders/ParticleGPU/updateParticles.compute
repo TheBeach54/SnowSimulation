@@ -1,0 +1,625 @@
+﻿#pragma kernel CSMain _SPOT_EMITTER
+#pragma kernel CSMain _SPHERE_EMITTER
+#pragma kernel CSMain _CUBE_EMITTER
+
+//--------------------------------------------//
+//------GPU Particle System for Unity 5.5-----//
+//---------Made using Unity 5.5.0f3-----------//
+//-----------By César Creutz------------------//
+//----------------2017------------------------//
+//--------------------------------------------//
+
+struct Particle
+{
+	float4 position; // xyz = wPos, w = Life duration 
+	float4 speedLife; // xyz = Speed, w = Life expectancy
+	float4 color;
+	float4 seed;
+};
+
+struct SphereColliderGPU
+{
+	float4 position_rad;
+};
+
+struct BoxColliderGPU
+{
+	float4 position;
+	float4x4 unity_WorldToObject;
+	float4x4 unity_ObjectToWorld;
+};
+
+struct CapsuleColliderGPU
+{
+	float4 position_rad;
+	float4 rotation_height;
+};
+
+struct EffectorGPU
+{
+	float4 position_rad;
+	float4 direction_force;
+	float attraction;
+	int effectorType;
+};
+
+RWStructuredBuffer<Particle> particleBuffer;
+StructuredBuffer<EffectorGPU> effectorBuffer;
+StructuredBuffer<SphereColliderGPU> sphereColliderBuffer;
+StructuredBuffer<BoxColliderGPU> boxColliderBuffer;
+StructuredBuffer<CapsuleColliderGPU> capsuleColliderBuffer;
+
+Texture2D<float4> randomTex;
+
+SamplerState _LinearRepeat;
+
+int collisions;
+
+float time;
+float radius;
+float deltaTime;
+float gravity;
+float groundLevel;
+float groundThreshold;
+float bounceSlideThreshold;
+float minBounciness;
+float maxBounciness;
+float minDrag;
+float maxDrag;
+float minFloorDrag;
+float maxFloorDrag;
+float minFloorSpread;
+float maxFloorSpread;
+float minLifeTime;
+float maxLifeTime;
+float minInitSpeed;
+float maxInitSpeed;
+
+float maxInheritSpeedMultiplier;
+float minInheritSpeedMultiplier;
+
+int shape; //0 = Circle ; 1 = Sphere
+float fillShape;
+
+float3 emitterDir;
+float3 emitterSize;
+float3 emitterPos;
+float3 emitterSpeed;
+
+float randomizeInitDir;
+
+float Hash(float pos)
+{
+	float3 p3 = frac(float3(pos, pos, pos)* 95.0f);
+	p3 += dot(p3, p3 + 19.19f);
+	return frac((p3.x + p3.y)*p3.z);
+}
+
+float4 Random(float4 position)
+{
+	return frac(float4(Hash(position.x * 25.215f), Hash(position.y * 45.214f), Hash(position.z * 1.2846), Hash(position.w * 94.162f)));
+}
+
+float3 DrawCubeShell(float3 seed)
+{
+	float3 randomDir = seed.xyz * 2 - 1;
+	float3 position = 0;
+
+	float3 rDabs = abs(randomDir);
+
+	if (rDabs.x > rDabs.y)
+	{
+		if (rDabs.x > rDabs.z)
+		{
+			position.yz += randomDir.yz * emitterSize.yz;
+			position.x += sign(randomDir.x) * emitterSize.x;
+		}
+		else
+		{
+			position.xy += randomDir.xy * emitterSize.xy;
+			position.z += sign(randomDir.z) * emitterSize.z;
+		}
+	}
+	else
+	{
+		if (rDabs.y > rDabs.z)
+		{
+			position.xz += randomDir.xz * emitterSize.xz;
+			position.y += sign(randomDir.y) * emitterSize.y;
+		}
+		else
+		{
+			position.xy += randomDir.xy * emitterSize.xy;
+			position.z += sign(randomDir.z) * emitterSize.z;
+		}
+	}
+	return position;
+}
+
+float3 Slide(float3 normal, float3 grav, float3 pSpeed, float dragFactor)
+{
+	// here we want the normalized gravity
+	float3 nGravity = normalize(grav);
+	// Here we create the slide vector but in the case where the normal is straight up it will not work
+	// We should check before hand if the dot(normal,gravity) is -1
+	float3 slideVec = cross(cross(normal, nGravity), normal);
+	float3 slideDir = normalize(slideVec);
+
+	// Project speed vector onto the slide vector
+	float VdotS = dot(pSpeed, slideVec);
+	// Multiply the result with the slide vector
+	slideVec.xyz = slideDir.xyz * (VdotS);
+	// Project gravity onto the slide vector
+	float GdotS = dot(grav, slideDir);
+	// We add the gravity to the slide vector
+	slideVec.xyz += (slideDir * GdotS);
+	// Finally we substract the drag of the floor
+	return slideVec - slideVec * saturate(dragFactor);
+}
+
+float3 Bounce(float3 normal, float3 pSpeed, float bounciness)
+{
+	// We just return the reflection vector time the bounciness
+	return reflect(pSpeed, normal)  * bounciness;
+}
+
+[numthreads(32, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID, uint3 threadID : SV_GroupID)
+{
+	//Get data from Buffer
+	float4 position = particleBuffer[id.x].position;
+	float4 speedLife = particleBuffer[id.x].speedLife;
+	float4 particleSeed = particleBuffer[id.x].seed;
+
+	//Get buffer dimensions
+	uint partLoad;
+	uint partStride;
+	particleBuffer.GetDimensions(partLoad, partStride);
+
+	// Here we sample a random noise texture, we should not. But we did
+	float4 randTex = randomTex.SampleLevel(_LinearRepeat, particleSeed.zw, 0.0f);
+
+	// Compute a bunch random values for each particule
+	float seed = frac(((float)id.x / partLoad) + randTex.x);
+	float4 VecSeed = frac(seed.xxxx*9.5165 - randTex*3.5164 + particleSeed*5.153f);
+
+	//Init or Reset dead particle
+	if (speedLife.w <= 0.0f)
+	{
+
+		position.xyz = emitterPos.xyz;
+
+		// compute random angle from the seed
+		float randomAngle = seed.x * 3.1415f * 2;
+		float randomAngleSec = VecSeed.x * 3.1415f * 2;
+
+
+		//Lerp values to randomize
+		float lerpInitSpeed = lerp(minInitSpeed, maxInitSpeed, VecSeed.y);
+		float lerpInheritSpeed = lerp(minInheritSpeedMultiplier, maxInheritSpeedMultiplier, VecSeed.z);
+
+		float lerper = fillShape;
+		float innerShape;
+
+		// Draw Emitter Shape
+		// We use different shader variant here because we want to avoid useless if statements
+		// Especially when the result is the same for all particles
+#if _SPOT_EMITTER
+		innerShape = lerp(1.0f, pow(particleSeed.x, 0.5f), lerper);
+		float3 spotDir = emitterDir;
+		float3 spotTan = normalize(cross(emitterDir, float3(0, 1, 0))) * 0.1;
+
+		float3 spotUp = normalize(cross(spotTan, emitterDir)) * 0.1;
+
+		float3 launchDir = (emitterSpeed.xyz * lerpInheritSpeed) + normalize(spotDir) + (sin(randomAngle) * spotTan * emitterSize.x + cos(randomAngle) * spotUp * emitterSize.z)* innerShape;
+		float3 launchOrigin = emitterPos + (sin(randomAngle) * spotTan * emitterSize.y + cos(randomAngle) * spotUp * emitterSize.y)* innerShape;
+		// Compute new init speed
+		position.xyz = launchOrigin;
+		speedLife.xyz = (normalize(launchDir) + (normalize(Random(VecSeed).xyz * 2 - 1)*randomizeInitDir)) * lerpInitSpeed;
+#endif
+
+#if _SPHERE_EMITTER
+		innerShape = lerp(1.0f, pow(particleSeed.w, 0.5f), lerper);
+		float3 sphereRandDir = normalize(frac(VecSeed.xxx + particleSeed.xyz) * 2 - 1);
+		position.xyz += sphereRandDir * emitterSize * innerShape;
+
+		// Compute new init speed
+		speedLife.xyz = (emitterSpeed.xyz * lerpInheritSpeed) + lerp(sphereRandDir, normalize(Random(VecSeed).xyz * 2 - 1), randomizeInitDir) * lerpInitSpeed;
+#endif
+
+#if _CUBE_EMITTER
+		float3 tPos = (particleSeed.xyz * 2 - 1) * emitterSize;
+
+		//Check if we need to compute cube shell position ( more expensive )
+		if (lerper < 0.95)
+			tPos = lerp(DrawCubeShell(particleSeed.xyz), (particleSeed.xyz * 2 - 1) * emitterSize, lerper);
+
+		position.xyz += tPos;
+		speedLife.xyz = (emitterSpeed.xyz * lerpInheritSpeed) + normalize(Random(VecSeed).xyz * 2 - 1) * lerpInitSpeed;
+#endif
+
+
+
+		// Compute new life expectancy
+		float newLife = lerp(minLifeTime, maxLifeTime, frac(particleSeed.w + VecSeed.w + seed));
+		position.w = newLife;
+		speedLife.w = newLife;
+
+		// Compute new seed																								   
+		particleBuffer[id.x].seed = frac(particleSeed*5.2314 + randTex*83.21 - VecSeed * 7.0252f + (id.x + threadID.x) * 8.51235 - Hash(time));
+	}
+	else // Update living particle
+	{
+
+		// Setup random bounce and drag
+		float lerpBounce = lerp(minBounciness, maxBounciness, VecSeed.z);
+		float lerpDrag = lerp(minDrag, maxDrag, VecSeed.w);
+		float lerpFloorSpread = lerp(minFloorSpread, maxFloorSpread, VecSeed.y);
+		float lerpFloorDrag = lerp(minFloorDrag, maxFloorDrag, VecSeed.x);
+
+		// Update position
+		position.xyz += speedLife.xyz*deltaTime;
+
+		//Compute all sphere collisions
+		uint stride;
+		uint numStructs;
+		sphereColliderBuffer.GetDimensions(numStructs, stride);
+		for (uint i = 0; i < numStructs; i++)
+		{
+			float4 pos_rad = sphereColliderBuffer[i].position_rad;
+			// Setting up the needed vector
+			float3 colliderToParticle = position.xyz - pos_rad.xyz;
+			float3 colliderDir = normalize(colliderToParticle);
+			// radius is the radius of the particle, pos_rad.w the radius of the sphere
+			float3 collider = colliderDir * (pos_rad.w + 0.5* radius);
+
+			// We check if the particle is in the sphere
+			float sphereCheck = length(colliderToParticle) - length(collider);
+			float sCheck = step(0.0f, sphereCheck);
+
+			if (sCheck == 0.0f)
+			{
+				// We collide, we increment
+				collisions++;
+
+				position.xyz = pos_rad.xyz + collider;
+
+				//We use the slide function and the bounce function to compute the new velocity
+				float3 bounceSpeed = Bounce(colliderDir, speedLife.xyz, lerpBounce);
+				float3 slideSpeed = Slide(colliderDir, float3(0, 1, 0)*gravity, speedLife.xyz, lerpFloorDrag);
+
+				// We check if we need to bounce or slide
+				float needBounce = step(0.0, length(bounceSpeed) - bounceSlideThreshold);
+
+				speedLife.xyz = lerp(slideSpeed, bounceSpeed, needBounce);
+
+			}
+		}
+
+		//Compute all capsule collisions
+		capsuleColliderBuffer.GetDimensions(numStructs, stride);
+		for (uint j = 0; j < numStructs; j++)
+		{
+			float4 pos_rad = capsuleColliderBuffer[j].position_rad;
+			float4 rotation_height = capsuleColliderBuffer[j].rotation_height;
+
+			float height = rotation_height.w;
+			float3 rotation = rotation_height.xyz;
+
+			float4x4 worldToObj;
+			float4x4 objToWorld;
+
+			worldToObj[0] = float4(1, 0, 0, 0);
+			worldToObj[1] = float4(0, 1, 0, 0);
+			worldToObj[2] = float4(0, 0, 1, 0);
+			worldToObj[3] = float4(rotation, 0);
+
+			objToWorld[0] = float4(1, 0, 0, 0);
+			objToWorld[1] = float4(0, 1, 0, 0);
+			objToWorld[2] = float4(0, 0, 1, 0);
+			objToWorld[3] = float4(-rotation, 0);
+
+			float3 cSPos = mul(worldToObj, float4(position.xyz, 1.0)).xyz;
+			float3 cSSpeed = mul(worldToObj, float4(speedLife.xyz, 1.0)).xyz;
+			//1 0 0 0
+			//0 1 0 0
+			//0 0 1 0
+			//x y z 0
+
+			float3 capsToPart = cSPos.xyz - pos_rad.xyz;
+
+			float3 axe = float3(0, 1, 0);
+
+			float tbDist = max(0, height * 0.5 - pos_rad.w);
+			float3 top = pos_rad.xyz + axe * tbDist;
+			float3 bot = pos_rad.xyz - axe * tbDist;
+
+			float3 topToPart = cSPos.xyz - top;
+			float3 botToPart = cSPos.xyz - bot;
+
+			float3 colliderDir;
+			float3 collider;
+
+			int check = 0;
+
+			float cylinderCheck = (1 - step(0.0f, length(capsToPart.xz) - pos_rad.w));
+			float rangeCheck = (1 - step(0.0f, abs(pos_rad.y - position.y) - tbDist));
+			float topCheck = 1 - step(0.0f, length(topToPart) - pos_rad.w);
+			float botCheck = 1 - step(0.0f, length(botToPart) - pos_rad.w);
+
+			float globalCheck = saturate(cylinderCheck * rangeCheck + topCheck + botCheck);
+
+
+			if (cylinderCheck * rangeCheck == 1) // if in the radius and in between top and bottom
+			{
+				// We collide, we increment
+				collisions++;
+				colliderDir = normalize(capsToPart.xyz * float3(1, 0, 1));
+				collider = colliderDir * pos_rad.w;
+
+				cSPos.xz = pos_rad.xz + collider.xz;
+			}
+			else if (topCheck == 1) // if in the radisu
+			{
+
+				// We collide, we increment
+				collisions++;
+				colliderDir = normalize(topToPart);
+				collider = colliderDir * pos_rad.w;
+
+				cSPos.xyz = top.xyz + collider;
+
+			}
+			else if (botCheck == 1)
+			{
+
+				// We collide, we increment
+				collisions++;
+				colliderDir = normalize(botToPart);
+				collider = colliderDir * pos_rad.w;
+
+				cSPos.xyz = bot.xyz + collider;
+
+			}
+
+
+			//We use the slide function and the bounce function to compute the new velocity
+
+			float3 bounceSpeed = Bounce(colliderDir, cSSpeed.xyz, lerpBounce);
+			float3 slideSpeed = Slide(colliderDir, float3(0, 1, 0)*gravity, cSSpeed.xyz, lerpFloorDrag);
+
+			// We check if we need to bounce or slide
+			float needBounce = step(0.0, length(bounceSpeed) - bounceSlideThreshold);
+
+			// we change the velocity only when we collide
+			cSSpeed.xyz = lerp(cSSpeed.xyz, lerp(slideSpeed, bounceSpeed, needBounce), globalCheck);
+
+
+			position.xyz = mul(objToWorld, float4(cSPos.xyz, 1.0));
+			speedLife.xyz = mul(objToWorld, float4(cSSpeed.xyz, 1.0));
+
+		}
+
+
+		//Compute all box collisions
+		boxColliderBuffer.GetDimensions(numStructs, stride);
+		for (uint k = 0; k < numStructs; k++)
+		{
+			//We don't need the boxPos since we work in object space of the cube
+			float3 boxPos = float3(0, 0, 0);
+
+			//But of course we do need to transform the particule pos and velocity
+			//And the gravity vector, we could theoraticly use directly the matrix 
+			//but in the future we want to connect the unity gravity settings
+			//However we don't need the velocity and gravity right now so we just grab the position
+			//We also transform the radius without rotation
+			float4 partPos = mul(boxColliderBuffer[k].unity_WorldToObject, float4(position.xyz, 1.0f));
+			float3 transformRadius = mul((float3x3)boxColliderBuffer[k].unity_WorldToObject, float3(radius, radius, radius));
+			float3 WSrad = 0.5*abs(transformRadius.xyz);
+
+			//Setting up the bounding sphere to check if we need to check the collision for the cube ( much more expensive )
+			float3 boxToPart = partPos.xyz;
+			float3 boundingSphere = normalize(boxToPart);
+
+			// 1 stand for length(boundingSphere), since we normalize it earlier, it's 1
+			float sphereCheck = length(boxToPart) - (1 + length(WSrad));
+			float sCheck = step(0.0f, sphereCheck);
+
+			//We first check if the particle is in the boundingSphere of the box to avoid useless if statements
+			if (sCheck == 0)
+			{
+
+				//Setting up the bound for a cube
+				float Xbound = 0.5f + WSrad.x;//boxScale.x/2;
+				float Ybound = 0.5f + WSrad.y;//boxScale.y/2;
+				float Zbound = 0.5f + WSrad.z;//boxScale.z/2;
+
+				float3 bounds = float3(Xbound, Ybound, Zbound);
+				float3 absPartPos = abs(partPos.xyz);
+
+				//Check if the particle is in the box
+				float3 boxCheck = step(0.0, absPartPos - bounds);
+				float bCheck = boxCheck.x + boxCheck.y + boxCheck.z;
+
+				if (bCheck == 0)
+				{
+					//We collide and increment
+					collisions++;
+
+					float3 partSpeed = mul(boxColliderBuffer[k].unity_WorldToObject, float4(speedLife.xyz, 0.0f)).xyz;
+					float3 gravityCubeSpace = mul(boxColliderBuffer[k].unity_WorldToObject, float4(0.0f, 1.0f, 0.0f, 0.0f) * gravity).xyz;
+					//Setup the 3 axis
+					float3 X = float3(1, 0, 0);
+					float3 Y = float3(0, 1, 0);
+					float3 Z = float3(0, 0, 1);
+
+
+					float3 normalDir;
+					float normSign;
+					float3 absBTP = abs(boundingSphere);
+					//We take the absolute value to find the surface normal
+					//If we take the largest component of the vector box to particle and then multiply it
+					//By the sign() of the same component we find the normal vector of the impact
+					//We then reset the same component on the particle position to the position on the bound of the box
+
+
+					//Pretty sure we could optimize by getting ride of those if statement
+					if (absBTP.x > absBTP.y)
+					{
+						if (absBTP.x > absBTP.z)
+						{
+							normSign = sign(boxToPart.x);
+							normalDir = normSign * X;
+							partPos.x = Xbound * normSign;
+						}
+						else
+						{
+							normSign = sign(boxToPart.z);
+							normalDir = normSign * Z;
+							partPos.z = Zbound * normSign;
+						}
+					}
+					else
+					{
+						if (absBTP.y > absBTP.z)
+						{
+							normSign = sign(boxToPart.y);
+							normalDir = normSign * Y;
+							partPos.y = Ybound * normSign;
+						}
+						else
+						{
+							normSign = sign(boxToPart.z);
+							normalDir = normSign * Z;
+							partPos.z = Zbound * normSign;
+						}
+					}
+
+					//We take the average of the previous pos and the new pos
+					partPos.xyz = (partPos.xyz + (partPos.xyz - partSpeed.xyz * deltaTime))*0.5f;
+
+					boxToPart = partPos.xyz;
+					//normalDir = normalize(boxToPart + normalDir);
+					//normalDir *= normalDir;
+					//normalDir *= normalDir;
+					normalDir = normalize(normalDir);
+
+
+					//float3 boxDir = normalize(boxToPart);
+
+					float3 bounceSpeed = Bounce(normalDir, partSpeed, lerpBounce);
+					float3 slideSpeed = Slide(normalDir, gravityCubeSpace, partSpeed, lerpFloorDrag);
+
+					//We transform back the particle velocity to check if we need to bounce or slide
+					float3 wSBounce = mul(boxColliderBuffer[k].unity_ObjectToWorld, float4(bounceSpeed.xyz, 0.0f)).xyz;
+
+					float GdotN = dot(gravityCubeSpace, normalDir);
+					float gravCheck = step(0.0f, GdotN);
+
+					float needBounce = step(0.0, length(wSBounce) - bounceSlideThreshold);
+					float3 newSpeed = lerp(slideSpeed, bounceSpeed, saturate(needBounce + gravCheck));
+
+					// If the normal is in the same dir as the particle then let the particle unchanged
+					float SdotN = dot(partSpeed, normalDir);
+					float dirCheck = step(0.0f, SdotN);
+
+					// We transform back the position and velocity
+					float3 newWS = mul(boxColliderBuffer[k].unity_ObjectToWorld, float4(newSpeed.xyz, 0.0f)).xyz;
+					float3 newWP = mul(boxColliderBuffer[k].unity_ObjectToWorld, float4(partPos.xyz, 1.0f)).xyz;
+
+					speedLife.xyz = lerp(newWS, speedLife.xyz, dirCheck);
+					position.xyz = lerp(newWP, position.xyz, dirCheck);
+				}
+			}
+		}
+
+
+
+		// Groundcheck and bounce
+		if (position.y < groundLevel)
+		{
+			collisions++;
+			position.y = groundLevel;
+
+			// We use fake normal not straight up to avoid the cross issue
+			float3 bounceSpeed = Bounce(float3(0.01, 0.99, 0), speedLife.xyz, lerpBounce);
+			float3 slideSpeed = Slide(float3(0.01, 0.99, 0), float3(0, 1, 0)*gravity, speedLife.xyz, lerpFloorDrag);
+
+			float needBounce = step(1.0, length(bounceSpeed) - bounceSlideThreshold);
+
+			float3 newSpeed = lerp(slideSpeed, bounceSpeed, needBounce);
+
+			speedLife.xyz = newSpeed;
+		}
+
+		// Compute all external forces, effectors
+		effectorBuffer.GetDimensions(numStructs, stride);
+		for (uint l = 0; l < numStructs; l++)
+		{
+			float4 effPosRad = effectorBuffer[l].position_rad;
+			float4 effDirForce = effectorBuffer[l].direction_force;
+	float3 effPos = effPosRad.xyz;
+	float3 effDirection = effDirForce.xyz;
+			float effRad = effPosRad.w;
+			float effForce = effDirForce.w;
+			int effType = effectorBuffer[l].effectorType;
+			float effPull = effectorBuffer[l].attraction;
+
+			float3 effToPart = position.xyz - effPos;
+
+			float effectFactor = smoothstep(effRad, 0, length(effToPart));
+				float3 effPartDir = normalize(effToPart);
+
+
+			if (effType == 2) // Tornado
+			{
+				float3 down = float3(0, -1, 0);
+				float3 torTangent = cross(effPartDir, down);
+
+				float speedBoost = lerp(1, effForce, effectFactor);
+
+				speedLife.xyz = lerp(speedLife.xyz,speedLife.xyz + torTangent * speedBoost + (-effPartDir * effPull), effectFactor);
+
+			}
+			else if (effType == 1 ) // Spherical
+			{
+			speedLife.xyz += effPartDir * effForce * effectFactor;
+				
+			}
+			else // Directional
+			{
+				speedLife.xyz += effDirection * effForce * effectFactor;
+
+			}
+
+
+
+
+		}
+
+
+		// Apply gravity
+
+		// Update Particle Life
+		speedLife.w -= deltaTime;
+
+
+		// If we don't collide with anything we apply the air drag and the gravity
+		// In theory we could apply the drag anyway but here we won't
+		if (collisions == 0)
+		{
+			speedLife.xyz *= saturate(1.0 - lerpDrag*deltaTime);
+			speedLife.y += gravity*deltaTime;
+
+		}
+
+
+	}
+
+	//Set new data back to the Buffer
+	particleBuffer[id.x].seed = particleSeed;
+	particleBuffer[id.x].position = position;
+	particleBuffer[id.x].speedLife = speedLife;
+
+}
+

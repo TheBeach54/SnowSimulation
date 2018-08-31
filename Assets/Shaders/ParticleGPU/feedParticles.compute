@@ -1,0 +1,21 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain // expose la function pour etre utilisée ( rendu ). Point d'entrée du shader
+
+struct Particle
+{
+	float4 position; // xyz = wPos, w = Life duration 
+	float4 speedLife; // xyz = Speed, w = Life expectancy
+	float4 color;
+	float4 seed;
+};
+
+RWStructuredBuffer<Particle> particleBuffer;
+
+
+[numthreads(32, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID, uint3 threadID : SV_GroupID)
+{
+
+
+}
+
