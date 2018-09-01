@@ -3,11 +3,13 @@
 	Properties
 	{
 		_MainTex ("Texture", 2D) = "white" {}
-	_Zoom("Zoom", Range(0.1,50)) = 1
+	_Zoom("Zoom", Range(0.1,500000)) = 1
 		_OffsetX("Offset X", Range(-1,1)) = 0
 		_OffsetY("Offset Y", Range(-1,1)) = 0
 		_ColorA("ColorA", Color) = (1,1,1,1)
 		_ColorB("ColorB", Color) = (0,0,0,1)
+
+		_Speed("Speed", Float) = 1
 
 	}
 	SubShader
@@ -33,9 +35,11 @@
 			{
 				float2 uv : TEXCOORD0;
 				float4 vertex : SV_POSITION;
+				float3 wPos : TEXCOORD1;
 			};
 
 			sampler2D _MainTex;
+			float _Speed;
 			float4 _MainTex_ST;
 			float _Zoom, _OffsetX, _OffsetY;
 			float4 _ColorA, _ColorB;
@@ -44,16 +48,18 @@
 			{
 				v2f o;
 				o.vertex = UnityObjectToClipPos(v.vertex);
+				o.wPos = mul(unity_ObjectToWorld, v.vertex);
 				o.uv = TRANSFORM_TEX(v.uv, _MainTex);
 				return o;
 			}
 			
 			fixed4 frag (v2f i) : SV_Target
 			{
-				float2 coord = i.uv * 2.0f - 1.0f;
+				float2 coord = i.wPos.xy * 2.0f - 1.0f;
 				coord /= _Zoom;
 				coord += float2(_OffsetX, _OffsetY);
 				
+				float time = _Time.y * _Speed;
 				float counter = 0.0f;
 				float upperLimit = 256.0f * 256.0f;
 				float iterationCount = 200.0f;
@@ -62,7 +68,7 @@
 				for (int i; i < iterationCount; i++)
 				{
 					// z = z*z +c
-					z = float2(z.x*z.x*((sin(_Time.y * 5)*0.5 + 0.5)*0.5 + 0.5) - z.y*z.y*((cos(_Time.y * 5)*0.5 + 0.5)*0.5 + 0.5), 2.0f*z.x*z.y) + coord;
+					z = float2(z.x*z.x*((cos(time * 5)*0.5 + 0.5)*0.5 + 0.5) - z.y*z.y*((cos(time * 5)*0.5 + 0.5)*0.5 + 0.5), 2.0f*z.x*z.y) + coord;
 
 					if (dot(z, z) > upperLimit)
 						break;
